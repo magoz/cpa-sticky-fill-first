@@ -40,21 +40,21 @@ var (
 )
 
 func TestFirstPickFollowsFillFirstOrder(t *testing.T) {
-	s := NewScheduler(DefaultConfig())
+	s := NewScheduler(DefaultConfig(), nil)
 	mustPick(t, s, request("m", backup, primary), t0, "primary")
 
-	tied := NewScheduler(DefaultConfig())
+	tied := NewScheduler(DefaultConfig(), nil)
 	mustPick(t, tied, request("m", candidate("b", 1), candidate("a", 1)), t0, "a")
 }
 
 func TestStaysOnFailoverCredentialAfterPrimaryRecovers(t *testing.T) {
-	s := NewScheduler(DefaultConfig())
+	s := NewScheduler(DefaultConfig(), nil)
 	mustPick(t, s, request("m", primary, backup), t0, "primary")
 
 	// Primary runs out of quota and drops out of the candidates.
 	mustPick(t, s, request("m", backup), t0.Add(time.Minute), "backup")
 	moved := mustPick(t, s, request("m", backup), t0.Add(time.Minute+DefaultSwitchAfter), "backup")
-	if moved == nil || moved.From != "primary" || moved.To != "backup" || moved.MissingFor != DefaultSwitchAfter {
+	if moved == nil || moved.From != "primary" || moved.To != "backup" || moved.Reason != ReasonGraceExpired || moved.MissingFor != DefaultSwitchAfter {
 		t.Fatalf("switch = %+v, want primary -> backup after %s", moved, DefaultSwitchAfter)
 	}
 
@@ -73,7 +73,7 @@ func TestStaysOnFailoverCredentialAfterPrimaryRecovers(t *testing.T) {
 }
 
 func TestShortAbsenceKeepsPin(t *testing.T) {
-	s := NewScheduler(DefaultConfig())
+	s := NewScheduler(DefaultConfig(), nil)
 	mustPick(t, s, request("m", primary, backup), t0, "primary")
 
 	// A retry that already tried primary, or a one-minute transient cooldown.
@@ -91,7 +91,7 @@ func TestZeroSwitchAfterMovesImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewScheduler(cfg)
+	s := NewScheduler(cfg, nil)
 	mustPick(t, s, request("m", primary, backup), t0, "primary")
 	if moved := mustPick(t, s, request("m", backup), t0, "backup"); moved == nil {
 		t.Fatal("want immediate switch")
@@ -100,7 +100,7 @@ func TestZeroSwitchAfterMovesImmediately(t *testing.T) {
 }
 
 func TestRoutesArePinnedPerModelIgnoringThinkingSuffix(t *testing.T) {
-	s := NewScheduler(DefaultConfig())
+	s := NewScheduler(DefaultConfig(), nil)
 	mustPick(t, s, request("opus", primary, backup), t0, "primary")
 	mustPick(t, s, request("opus", backup), t0.Add(time.Minute), "backup")
 	mustPick(t, s, request("opus", backup), t0.Add(time.Minute+DefaultSwitchAfter), "backup")
@@ -114,7 +114,7 @@ func TestOutOfScopeRequestsAreUnhandled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewScheduler(cfg)
+	s := NewScheduler(cfg, nil)
 
 	codex := request("m", primary, backup)
 	codex.Provider, codex.Providers = "codex", []string{"codex"}
@@ -135,7 +135,7 @@ func TestOutOfScopeRequestsAreUnhandled(t *testing.T) {
 }
 
 func TestSingleProviderOnMixedPathIsHandled(t *testing.T) {
-	s := NewScheduler(DefaultConfig())
+	s := NewScheduler(DefaultConfig(), nil)
 	req := request("m", primary, backup)
 	req.Provider = ""
 	mustPick(t, s, req, t0, "primary")
@@ -145,7 +145,7 @@ func TestSingleProviderOnMixedPathIsHandled(t *testing.T) {
 }
 
 func TestCodexWebsocketPoolsAreUnhandled(t *testing.T) {
-	s := NewScheduler(DefaultConfig())
+	s := NewScheduler(DefaultConfig(), nil)
 	ws := pluginapi.SchedulerAuthCandidate{ID: "ws", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}
 	req := pluginapi.SchedulerPickRequest{Provider: "codex", Providers: []string{"codex"}, Model: "m", Candidates: []pluginapi.SchedulerAuthCandidate{ws, backup}}
 	if resp, _ := s.Pick(req, t0); resp.Handled {
@@ -157,7 +157,7 @@ func TestCodexWebsocketPoolsAreUnhandled(t *testing.T) {
 }
 
 func TestConfigureKeepsPins(t *testing.T) {
-	s := NewScheduler(DefaultConfig())
+	s := NewScheduler(DefaultConfig(), nil)
 	mustPick(t, s, request("m", primary, backup), t0, "primary")
 	mustPick(t, s, request("m", backup), t0.Add(time.Minute), "backup")
 	mustPick(t, s, request("m", backup), t0.Add(time.Minute+DefaultSwitchAfter), "backup")

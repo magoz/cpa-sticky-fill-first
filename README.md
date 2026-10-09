@@ -15,9 +15,22 @@ Plugin ID: `sticky-fill-first`. Requires CLIProxyAPI 7.3.8 or newer (scheduler p
 
 - Every provider and model route (for example `claude` + `claude-opus-5-5`) has a pin: the credential that last served it. A thinking suffix such as `(high)` shares the pin of its base model.
 - While the pinned credential is available, it serves every request on that route, even when a higher-priority credential is also available.
-- If the pinned credential is missing from the available candidates, the request goes to the `fill-first` choice: highest priority first, then lowest auth ID. The pin moves to that choice only after the pinned credential has been missing for `switch_after` (default `5m`). A retry after a single upstream error, or CLIProxyAPI's one-minute cooldown after a transient error, does not move the pin. Running out of quota, which puts the credential in cooldown until the quota window resets, does.
+- If the pinned credential is missing from the available candidates, the request goes to the `fill-first` choice: highest priority first, then lowest auth ID. Whether the pin moves to that choice depends on why the credential is missing. The plugin asks CLIProxyAPI for the credential's runtime state (`host.auth.list`, at most once every 2 seconds):
+
+  | Host state of the pinned credential | Pin |
+  | --- | --- |
+  | Cooldown ending more than `max(30m, switch_after)` from now: a provider quota reset, such as Anthropic's unified limit or Codex's usage limit | Moves now |
+  | Disabled | Moves now |
+  | Shorter cooldown: a transient error (1 minute), an auth error being refreshed (30 minutes), or quota backoff without a reset time | Stays, until the grace period expires |
+  | No cooldown (the request already tried it, or is restricted to other credentials), or not reported by the host | Stays, until the grace period expires |
+
+- The grace period is the fallback: the pin moves once the pinned credential has been missing for `switch_after` (default `5m`).
+- The 30-minute floor is there because CLIProxyAPI caps every non-quota cooldown at 30 minutes, so only a real quota reset outlasts it.
 - On a route with no pin yet, the first request is served by the `fill-first` choice, which becomes the pin.
-- When a pin moves, the plugin logs at info level: `sticky-fill-first: pin moved from <old> to <new> after 5m0s unavailable provider=claude model=...`.
+- When a pin moves, the plugin logs at info level:
+  - `sticky-fill-first: pin moved from <old> to <new>: in cooldown until 2026-10-09T21:00:00Z provider=claude model=...`
+  - `... : disabled`
+  - `... : unavailable for 5m0s`
 
 Pins live in memory. Restarting CLIProxyAPI clears them, so routing goes back to priority order. Use a restart to return to your top-priority account deliberately.
 
@@ -45,7 +58,11 @@ Credential `priority` values still decide the first pin and where the pin moves.
   - the route spans several providers;
   - the request is for a Codex pool that has a websocket-enabled credential, because plugins cannot see whether the client connected over a websocket, and the built-in strategy prefers websocket credentials for those clients;
   - the provider is not listed in `providers`.
-- It decides only from which credentials CLIProxyAPI reports as available. It does not read quota or rate-limit headers, and it makes no requests of its own.
+- It decides from what CLIProxyAPI reports: the available candidates, and, when the pinned credential is missing, that credential's cooldown deadline and disabled flag from `host.auth.list`.
+  - It ignores status messages, because they can contain raw upstream errors.
+  - It logs no credential data other than auth IDs.
+  - It does not parse quota headers and makes no requests of its own.
+- Cooldowns on a single model, and credentials defined as config API keys rather than auth files, are not visible through `host.auth.list`. For those, the pin moves on the grace period only.
 
 ## Install
 

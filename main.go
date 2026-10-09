@@ -74,7 +74,11 @@ var version = "dev"
 
 const repository = "https://github.com/magoz/cpa-sticky-fill-first"
 
-var scheduler = sticky.NewScheduler(sticky.DefaultConfig())
+// hostStateTTL bounds how stale a host auth listing may be. A burst of picks while the pinned
+// credential is absent shares one host.auth.list call.
+const hostStateTTL = 2 * time.Second
+
+var scheduler = sticky.NewScheduler(sticky.DefaultConfig(), sticky.NewCachedInspector(listHostAuthStates, hostStateTTL))
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -200,12 +204,20 @@ func pick(raw []byte) ([]byte, error) {
 }
 
 func logSwitch(moved sticky.Switch) {
+	var why string
+	switch moved.Reason {
+	case sticky.ReasonCooldown:
+		why = "in cooldown until " + moved.Until.UTC().Format(time.RFC3339)
+	case sticky.ReasonDisabled:
+		why = "disabled"
+	default:
+		why = fmt.Sprintf("unavailable for %s", moved.MissingFor.Round(time.Second))
+	}
 	// Best effort: a failed host log call must not affect routing.
 	// The host log formatter prints only well-known field names, so the details go in the message.
 	_ = hostLog(hostLogRequest{
-		Level: "info",
-		Message: fmt.Sprintf("sticky-fill-first: pin moved from %s to %s after %s unavailable",
-			moved.From, moved.To, moved.MissingFor.Round(time.Second)),
+		Level:   "info",
+		Message: fmt.Sprintf("sticky-fill-first: pin moved from %s to %s: %s", moved.From, moved.To, why),
 		Fields: map[string]any{
 			"provider": moved.Provider,
 			"model":    moved.Model,
@@ -218,18 +230,65 @@ func hostLog(req hostLogRequest) error {
 	if errMarshal != nil {
 		return errMarshal
 	}
-	method := C.CString(pluginabi.MethodHostLog)
-	defer C.free(unsafe.Pointer(method))
+	_, errCall := callHost(pluginabi.MethodHostLog, payload)
+	return errCall
+}
+
+// hostAuthEntry is the subset of pluginapi.HostAuthFileEntry the scheduler reads. Status
+// messages are deliberately ignored: they can carry raw upstream error text.
+type hostAuthEntry struct {
+	ID             string    `json:"id"`
+	Disabled       bool      `json:"disabled"`
+	NextRetryAfter time.Time `json:"next_retry_after"`
+}
+
+// listHostAuthStates asks the host for every credential's runtime state via host.auth.list.
+func listHostAuthStates() (map[string]sticky.AuthState, error) {
+	raw, errCall := callHost(pluginabi.MethodHostAuthList, []byte("{}"))
+	if errCall != nil {
+		return nil, errCall
+	}
+	var resp envelope
+	if errUnmarshal := json.Unmarshal(raw, &resp); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host.auth.list envelope: %w", errUnmarshal)
+	}
+	if !resp.OK {
+		return nil, errors.New("host.auth.list failed")
+	}
+	var result struct {
+		Files []hostAuthEntry `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(resp.Result, &result); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host.auth.list result: %w", errUnmarshal)
+	}
+	// Entries without an ID come from the host's on-disk fallback and describe no runtime state.
+	states := make(map[string]sticky.AuthState, len(result.Files))
+	for _, entry := range result.Files {
+		if entry.ID != "" {
+			states[entry.ID] = sticky.AuthState{Disabled: entry.Disabled, NextRetryAfter: entry.NextRetryAfter}
+		}
+	}
+	return states, nil
+}
+
+// callHost invokes a host callback and returns a copy of its response envelope.
+func callHost(method string, payload []byte) ([]byte, error) {
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
 	body := C.CBytes(payload)
 	defer C.free(body)
 
 	var response C.cliproxy_buffer
-	status := C.call_host_api(method, (*C.uint8_t)(body), C.size_t(len(payload)), &response)
+	status := C.call_host_api(cMethod, (*C.uint8_t)(body), C.size_t(len(payload)), &response)
+	var raw []byte
+	if response.ptr != nil && response.len > 0 {
+		raw = C.GoBytes(response.ptr, C.int(response.len))
+	}
 	C.free_host_buffer(response.ptr, response.len)
 	if status != 0 {
-		return errors.New("host.log call failed")
+		return nil, fmt.Errorf("%s call failed", method)
 	}
-	return nil
+	return raw, nil
 }
 
 func pluginRegistration() registration {
