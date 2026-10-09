@@ -165,3 +165,32 @@ func TestConfigureKeepsPins(t *testing.T) {
 	s.Configure(DefaultConfig())
 	mustPick(t, s, request("m", primary, backup), t0.Add(time.Hour), "backup")
 }
+
+func TestPinsSnapshot(t *testing.T) {
+	s := NewScheduler(DefaultConfig(), nil)
+	if pins := s.Pins(); len(pins) != 0 {
+		t.Fatalf("Pins() = %+v, want none", pins)
+	}
+	mustPick(t, s, request("opus(high)", primary, backup), t0, "primary")
+	mustPick(t, s, request("haiku", primary, backup), t0, "primary")
+	mustPick(t, s, request("opus", primary, backup), t0.Add(time.Minute), "primary")
+	mustPick(t, s, request("haiku", backup), t0.Add(2*time.Minute), "backup")
+
+	pins := s.Pins()
+	if len(pins) != 2 {
+		t.Fatalf("Pins() = %+v, want 2", pins)
+	}
+	haiku, opus := pins[0], pins[1]
+	if haiku.Model != "haiku" || haiku.AuthID != "primary" || !haiku.MissingSince.Equal(t0.Add(2*time.Minute)) {
+		t.Errorf("haiku pin = %+v", haiku)
+	}
+	if opus.Model != "opus" || opus.Provider != "claude" || !opus.PinnedAt.Equal(t0) || !opus.LastPickedAt.Equal(t0.Add(time.Minute)) || !opus.MissingSince.IsZero() {
+		t.Errorf("opus pin = %+v", opus)
+	}
+
+	mustPick(t, s, request("haiku", backup), t0.Add(2*time.Minute+DefaultSwitchAfter), "backup")
+	moved := s.Pins()[0]
+	if moved.AuthID != "backup" || !moved.PinnedAt.Equal(t0.Add(2*time.Minute+DefaultSwitchAfter)) || !moved.MissingSince.IsZero() {
+		t.Errorf("moved haiku pin = %+v", moved)
+	}
+}

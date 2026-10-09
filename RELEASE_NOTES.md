@@ -1,3 +1,7 @@
+## v0.3.0
+
+- **New route:** `GET /v0/management/plugins/sticky-fill-first/pins` lists the current pin of every route. It is read-only and requires the management key. Each pin shows its provider, model, auth ID, when it was pinned, when it last served a request, and since when it has been unavailable, if it is.
+
 ## v0.2.0
 
 - **Immediate move on quota exhaustion.** When the pinned credential drops out, the plugin reads its runtime state from CLIProxyAPI (`host.auth.list`, cached for 2 seconds). It moves the pin right away when:

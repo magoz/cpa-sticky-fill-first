@@ -61,6 +61,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 	"unsafe"
 
@@ -106,6 +107,39 @@ type capabilities struct {
 	// SchedulerAcrossPriorities lets the plugin see lower-priority credentials, which it
 	// needs to stay on a failover credential after a higher-priority one recovers.
 	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities"`
+	// ManagementAPI exposes the read-only pins route, guarded by the host's management key.
+	ManagementAPI bool `json:"management_api"`
+}
+
+// pinsPath is served by the host as /v0/management/plugins/sticky-fill-first/pins.
+const pinsPath = "/plugins/sticky-fill-first/pins"
+
+type managementRegistration struct {
+	Routes []managementRoute `json:"routes"`
+}
+
+type managementRoute struct {
+	Method      string
+	Path        string
+	Description string
+}
+
+type managementRequest struct {
+	Method string
+	Path   string
+}
+
+type pinsResponse struct {
+	Pins []pinView `json:"pins"`
+}
+
+type pinView struct {
+	Provider     string     `json:"provider"`
+	Model        string     `json:"model"`
+	AuthID       string     `json:"auth_id"`
+	PinnedAt     time.Time  `json:"pinned_at"`
+	LastPickedAt time.Time  `json:"last_picked_at"`
+	MissingSince *time.Time `json:"missing_since"`
 }
 
 type hostLogRequest struct {
@@ -171,6 +205,14 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return okEnvelope(pluginRegistration())
 	case pluginabi.MethodSchedulerPick:
 		return pick(request)
+	case pluginabi.MethodManagementRegister:
+		return okEnvelope(managementRegistration{Routes: []managementRoute{{
+			Method:      http.MethodGet,
+			Path:        pinsPath,
+			Description: "Current sticky pins: the credential each provider and model route is routed to.",
+		}}})
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -201,6 +243,45 @@ func pick(raw []byte) ([]byte, error) {
 		logSwitch(*moved)
 	}
 	return okEnvelope(resp)
+}
+
+func handleManagement(raw []byte) ([]byte, error) {
+	var req managementRequest
+	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode management request: %w", errUnmarshal)
+	}
+	if req.Method != http.MethodGet {
+		return okEnvelope(jsonResponse(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}))
+	}
+	pins := scheduler.Pins()
+	views := make([]pinView, 0, len(pins))
+	for _, p := range pins {
+		view := pinView{
+			Provider:     p.Provider,
+			Model:        p.Model,
+			AuthID:       p.AuthID,
+			PinnedAt:     p.PinnedAt.UTC(),
+			LastPickedAt: p.LastPickedAt.UTC(),
+		}
+		if !p.MissingSince.IsZero() {
+			missingSince := p.MissingSince.UTC()
+			view.MissingSince = &missingSince
+		}
+		views = append(views, view)
+	}
+	return okEnvelope(jsonResponse(http.StatusOK, pinsResponse{Pins: views}))
+}
+
+func jsonResponse(status int, body any) pluginapi.ManagementResponse {
+	raw, errMarshal := json.Marshal(body)
+	if errMarshal != nil {
+		status, raw = http.StatusInternalServerError, []byte(`{"error":"encode response"}`)
+	}
+	return pluginapi.ManagementResponse{
+		StatusCode: status,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       raw,
+	}
 }
 
 func logSwitch(moved sticky.Switch) {
@@ -315,6 +396,7 @@ func pluginRegistration() registration {
 		Capabilities: capabilities{
 			Scheduler:                 true,
 			SchedulerAcrossPriorities: true,
+			ManagementAPI:             true,
 		},
 	}
 }

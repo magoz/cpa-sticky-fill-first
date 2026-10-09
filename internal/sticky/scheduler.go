@@ -10,6 +10,7 @@
 package sticky
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,9 @@ type routeKey struct {
 
 type pin struct {
 	authID string
+	// pinnedAt is when the route was pinned to authID; lastPickedAt is the latest pick that served it.
+	pinnedAt     time.Time
+	lastPickedAt time.Time
 	// missingSince is when a pick first found authID absent from the candidates; zero while present.
 	missingSince time.Time
 }
@@ -117,12 +121,13 @@ func (s *Scheduler) Pick(req pluginapi.SchedulerPickRequest, now time.Time) (plu
 	}
 	current, pinned := s.pins[key]
 	if !pinned {
-		s.pins[key] = &pin{authID: fallback}
+		s.pins[key] = newPin(fallback, now)
 		s.mu.Unlock()
 		return handled(fallback), nil
 	}
 	if containsCandidate(req.Candidates, current.authID) {
 		current.missingSince = time.Time{}
+		current.lastPickedAt = now
 		s.mu.Unlock()
 		return handled(current.authID), nil
 	}
@@ -135,7 +140,7 @@ func (s *Scheduler) Pick(req pluginapi.SchedulerPickRequest, now time.Time) (plu
 	}
 	missingFor := now.Sub(current.missingSince)
 	if missingFor >= s.cfg.SwitchAfter() {
-		moved := s.movePinLocked(key, fallback, Switch{Reason: ReasonGraceExpired, MissingFor: missingFor})
+		moved := s.movePinLocked(key, fallback, now, Switch{Reason: ReasonGraceExpired, MissingFor: missingFor})
 		s.mu.Unlock()
 		return handled(fallback), moved
 	}
@@ -168,16 +173,55 @@ func (s *Scheduler) Pick(req pluginapi.SchedulerPickRequest, now time.Time) (plu
 	if current, pinned := s.pins[key]; !pinned || current.authID != pinnedID {
 		return handled(fallback), nil
 	}
-	return handled(fallback), s.movePinLocked(key, fallback, event)
+	return handled(fallback), s.movePinLocked(key, fallback, now, event)
 }
 
-func (s *Scheduler) movePinLocked(key routeKey, to string, event Switch) *Switch {
+func (s *Scheduler) movePinLocked(key routeKey, to string, now time.Time, event Switch) *Switch {
 	event.Provider = key.provider
 	event.Model = key.model
 	event.From = s.pins[key].authID
 	event.To = to
-	s.pins[key] = &pin{authID: to}
+	s.pins[key] = newPin(to, now)
 	return &event
+}
+
+func newPin(authID string, now time.Time) *pin {
+	return &pin{authID: authID, pinnedAt: now, lastPickedAt: now}
+}
+
+// PinView is a read-only snapshot of one route's pin.
+type PinView struct {
+	Provider     string
+	Model        string
+	AuthID       string
+	PinnedAt     time.Time
+	LastPickedAt time.Time
+	// MissingSince is when the pinned credential was first found unavailable; zero while it is available.
+	MissingSince time.Time
+}
+
+// Pins returns every pin, ordered by provider then model.
+func (s *Scheduler) Pins() []PinView {
+	s.mu.Lock()
+	views := make([]PinView, 0, len(s.pins))
+	for key, current := range s.pins {
+		views = append(views, PinView{
+			Provider:     key.provider,
+			Model:        key.model,
+			AuthID:       current.authID,
+			PinnedAt:     current.pinnedAt,
+			LastPickedAt: current.lastPickedAt,
+			MissingSince: current.missingSince,
+		})
+	}
+	s.mu.Unlock()
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].Provider != views[j].Provider {
+			return views[i].Provider < views[j].Provider
+		}
+		return views[i].Model < views[j].Model
+	})
+	return views
 }
 
 // lockoutThreshold is the cooldown length that proves a quota lockout. It never drops below

@@ -51,6 +51,22 @@ plugins:
 
 Credential `priority` values still decide the first pin and where the pin moves. Higher priority wins, as with `fill-first`.
 
+## Inspecting pins
+
+The plugin registers a read-only Management API route. It is protected by the management key like every other `/v0/management` route:
+
+```bash
+curl -s -H "Authorization: Bearer $MANAGEMENT_KEY" http://127.0.0.1:8317/v0/management/plugins/sticky-fill-first/pins
+```
+
+```json
+{"pins":[{"provider":"claude","model":"claude-opus-5-5","auth_id":"claude-1234-user@example.com.json","pinned_at":"2026-10-09T19:14:40Z","last_picked_at":"2026-10-09T19:30:02Z","missing_since":null}]}
+```
+
+- `auth_id` is the credential ID; for auth files, that is the file name.
+- `missing_since` is set while the pinned credential is unavailable, which means the pin may be about to move.
+- The list is empty until the first request after a restart.
+
 ## Scope and caveats
 
 - For the providers it handles, the plugin takes precedence over `routing.strategy` and `routing.session-affinity`. Everything else keeps the configured strategy.
