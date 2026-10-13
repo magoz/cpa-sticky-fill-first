@@ -25,14 +25,21 @@ Plugin ID: `sticky-fill-first`. Requires CLIProxyAPI 7.3.8 or newer (scheduler p
   | No cooldown (the request already tried it, or is restricted to other credentials), or not reported by the host | Stays, until the grace period expires |
 
 - The grace period is the fallback: the pin moves once the pinned credential has been missing for `switch_after` (default `5m`).
-- The 30-minute floor is there because CLIProxyAPI caps every non-quota cooldown at 30 minutes, so only a real quota reset outlasts it.
+- The 30-minute floor sits above CLIProxyAPI's short cooldowns: transient errors (1 minute by default), auth errors (30 minutes), and its own quota backoff without a reset time or a Cloudflare challenge (both capped at 30 minutes). A provider quota reset is usually hours away. Two longer non-quota cooldowns also move the pin, which is intended because the credential cannot serve the route meanwhile: a model the credential does not support (12 hours), and an error whose `Retry-After` is longer than the floor.
 - On a route with no pin yet, the first request is served by the `fill-first` choice, which becomes the pin.
 - When a pin moves, the plugin logs at info level:
   - `sticky-fill-first: pin moved from <old> to <new>: in cooldown until 2026-10-09T21:00:00Z provider=claude model=...`
   - `... : disabled`
   - `... : unavailable for 5m0s`
 
-Pins live in memory. Restarting CLIProxyAPI clears them, so routing goes back to priority order. Use a restart to return to your top-priority account deliberately.
+By default pins live in memory, and restarting CLIProxyAPI sends every route back to priority order. Set `pins_file` to keep them across restarts:
+
+- The plugin writes the file (mode `0600`, replaced atomically) whenever a pin is created or moves, and reads it when it loads. It holds provider, model, auth ID and pin time, never credential data.
+- A restored pin is checked like any other. If its credential is gone, the pin moves after `switch_after`.
+- An unreadable file is logged and ignored, and it is overwritten on the next pin change.
+- To return to priority order deliberately, stop CLIProxyAPI, delete the file, and start it again.
+
+Pair it with CLIProxyAPI's `save-cooldown-status: true`. That keeps cooldowns across restarts too, so an exhausted credential is not tried again on the first request after a restart.
 
 ## Configuration
 
@@ -47,6 +54,8 @@ plugins:
       providers: [claude, codex]
       # How long the pinned credential must stay unavailable before the pin moves (Go duration).
       switch_after: 5m
+      # Optional absolute path that keeps pins across restarts. Omit to keep pins in memory only.
+      pins_file: /home/me/cliproxyapi/sticky-fill-first-pins.json
 ```
 
 Credential `priority` values still decide the first pin and where the pin moves. Higher priority wins, as with `fill-first`.

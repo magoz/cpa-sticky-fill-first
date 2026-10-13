@@ -62,6 +62,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -230,7 +231,47 @@ func configure(raw []byte) error {
 		return errParse
 	}
 	scheduler.Configure(cfg)
+	attachPinsFile(cfg.PinsFile())
 	return nil
+}
+
+var (
+	pinsFileMu sync.Mutex
+	// pinsFilePath is the pins file currently attached to the scheduler; "" when none.
+	pinsFilePath string
+)
+
+// attachPinsFile restores pins from path and saves every later change there. It does nothing
+// when path is already attached, so a reconfigure never replaces live pins with older saved ones.
+// A file that cannot be read is logged and replaced on the next save: losing pins only sends
+// routes back to priority order, which must not stop the plugin from loading.
+func attachPinsFile(path string) {
+	pinsFileMu.Lock()
+	defer pinsFileMu.Unlock()
+	if path == pinsFilePath {
+		return
+	}
+	pinsFilePath = path
+	if path == "" {
+		scheduler.Persist(nil, nil)
+		return
+	}
+
+	file := sticky.NewPinFile(path)
+	saved, errLoad := file.Load()
+	if errLoad != nil {
+		logWarn(fmt.Sprintf("sticky-fill-first: ignoring saved pins: %v", errLoad))
+	}
+	scheduler.Persist(saved, func(pins []sticky.SavedPin) {
+		if errSave := file.Save(pins); errSave != nil {
+			logWarn(fmt.Sprintf("sticky-fill-first: saving pins failed: %v", errSave))
+		}
+	})
+}
+
+// logWarn is best effort: a failed host log call must not affect routing.
+func logWarn(message string) {
+	_ = hostLog(hostLogRequest{Level: "warn", Message: message})
 }
 
 func pick(raw []byte) ([]byte, error) {
@@ -390,6 +431,11 @@ func pluginRegistration() registration {
 					Name:        "switch_after",
 					Type:        pluginapi.ConfigFieldTypeString,
 					Description: "How long the pinned credential must stay unavailable before the pin moves (Go duration, default 5m).",
+				},
+				{
+					Name:        "pins_file",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "Absolute path of a JSON file that keeps pins across restarts. Empty keeps pins in memory only.",
 				},
 			},
 		},

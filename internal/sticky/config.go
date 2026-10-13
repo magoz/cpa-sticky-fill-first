@@ -2,6 +2,7 @@ package sticky
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ type Config struct {
 	// providers restricts sticky routing to these provider keys; nil means every provider.
 	providers   map[string]struct{}
 	switchAfter time.Duration
+	// pinsFile is an absolute path where pins are saved across restarts; empty keeps them in memory only.
+	pinsFile string
 }
 
 // DefaultConfig applies sticky routing to every provider with DefaultSwitchAfter.
@@ -28,6 +31,11 @@ func DefaultConfig() Config {
 // SwitchAfter reports the grace period before an unavailable pinned credential is replaced.
 func (c Config) SwitchAfter() time.Duration {
 	return c.switchAfter
+}
+
+// PinsFile reports where pins are saved, or "" when they live in memory only.
+func (c Config) PinsFile() string {
+	return c.pinsFile
 }
 
 // Applies reports whether sticky routing handles the given provider key.
@@ -42,6 +50,7 @@ func (c Config) Applies(provider string) bool {
 type rawConfig struct {
 	Providers   []string `yaml:"providers"`
 	SwitchAfter string   `yaml:"switch_after"`
+	PinsFile    string   `yaml:"pins_file"`
 }
 
 // ParseConfig decodes the plugins.configs.sticky-fill-first YAML block. Unknown keys such as
@@ -62,6 +71,15 @@ func ParseConfig(raw []byte) (Config, error) {
 			return Config{}, fmt.Errorf("switch_after must not be negative, got %s", value)
 		}
 		cfg.switchAfter = duration
+	}
+
+	if value := strings.TrimSpace(parsed.PinsFile); value != "" {
+		// The host's working directory is not part of its contract, so a relative path has no
+		// stable meaning.
+		if !filepath.IsAbs(value) {
+			return Config{}, fmt.Errorf("pins_file must be an absolute path, got %s", value)
+		}
+		cfg.pinsFile = filepath.Clean(value)
 	}
 
 	for _, provider := range parsed.Providers {
