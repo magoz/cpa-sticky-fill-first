@@ -11,6 +11,8 @@ sticky-fill-first: A A A ✗ B B B (A resets) B B B ✗ A ...
 
 Plugin ID: `sticky-fill-first`. Requires CLIProxyAPI 7.3.8 or newer (scheduler plugins that see every priority tier).
 
+To spend the quota that resets soonest first, see [expiring-first](https://github.com/magoz/cpa-expiring-first). It ranks accounts by their quota reset times, read from a quota file, and falls back to this plugin's sticky routing.
+
 ## Behavior
 
 - Every provider and model route (for example `claude` + `claude-opus-5-5`) has a pin: the credential that last served it. A thinking suffix such as `(high)` shares the pin of its base model.
